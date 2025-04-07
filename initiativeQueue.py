@@ -8,6 +8,7 @@ class InitiativeTracker:
         self.current_index = 0
         self.round = 0
         self.is_active = False
+        self.last_message_id = None  # Armazena o ID da última mensagem enviada pelo tracker
     
     def add_character(self, character: Character):
         """Adiciona um personagem à iniciativa e reordena a lista"""
@@ -90,4 +91,13 @@ class InitiativeTracker:
             result.append(f"{prefix}{char}")
             
         header = f"📋 **INICIATIVA** (Rodada {self.round})\n" if self.is_active else "📋 **INICIATIVA**\n"
-        return header + "\n".join(result)
+        
+        # Adicionar instruções para reações
+        
+        controls = "\n\n**Controles:**\n⏩ Próximo turno | ▶️ Iniciar combate | 🧹 Limpar lista"
+        
+
+        if self.is_active:
+            controls = "\n\n**Controles:**\n⏩ Próximo turno | ⏹️ Encerrar combate | 🧹 Limpar lista"
+
+        return header + "\n".join(result) + controls

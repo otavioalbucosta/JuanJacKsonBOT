@@ -1,15 +1,26 @@
+import asyncio
+import discord
 from discord.ext import commands
-from dotenv import load_dotenv
 from typing import Dict
 from initiativeQueue import InitiativeTracker
 from character import Character
 from effects import Effect
 
 
+NEXT_TURN_EMOJI = "⏩"
+START_COMBAT_EMOJI = "▶️"
+END_COMBAT_EMOJI = "⏹️"
+CLEAR_LIST_EMOJI = "🧹"
+
+# Lista de emojis para adicionar às mensagens
+CONTROL_EMOJIS = [NEXT_TURN_EMOJI, START_COMBAT_EMOJI, END_COMBAT_EMOJI, CLEAR_LIST_EMOJI]
+
+# Comandos para o bot relacionados à iniciativa
 class InitiativeCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.trackers: Dict[int, InitiativeTracker] = {}  # Um tracker por canal
+        self.active_messages: Dict[int, int] = {}  # Mapeia mensagens para canais
     
     def get_tracker(self, channel_id: int) -> InitiativeTracker:
         """Obtém (ou cria) um tracker para o canal específico"""
@@ -17,11 +28,145 @@ class InitiativeCommands(commands.Cog):
             self.trackers[channel_id] = InitiativeTracker()
         return self.trackers[channel_id]
     
+    async def delete_previous_message(self, channel, tracker):
+        """Deleta a mensagem anterior da fila de iniciativa, se existir"""
+        if tracker.last_message_id:
+            try:
+                # Tenta buscar e deletar a mensagem anterior
+                message = await channel.fetch_message(tracker.last_message_id)
+                await message.delete()
+                
+                # Remove o mapeamento desta mensagem
+                if message.id in self.active_messages:
+                    del self.active_messages[message.id]
+                
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                # Ignora erros se a mensagem já não existe ou não pode ser deletada
+                pass
+            
+            # Limpa o ID da última mensagem no tracker
+            tracker.last_message_id = None
+    
+    async def send_initiative_message(self, ctx, tracker):
+        """Envia uma nova mensagem de iniciativa com reações após deletar a antiga"""
+        # Primeiro deleta a mensagem anterior
+        await self.delete_previous_message(ctx.channel, tracker)
+        
+        # Envia nova mensagem
+        content = tracker.get_initiative_list()
+        message = await ctx.send(content)
+        
+        # Registra esta mensagem
+        tracker.last_message_id = message.id
+        self.active_messages[message.id] = ctx.channel.id
+        
+        # Adiciona reações para controle
+        for emoji in CONTROL_EMOJIS:
+            if emoji == START_COMBAT_EMOJI and tracker.is_active:
+                continue
+            if emoji == END_COMBAT_EMOJI and not tracker.is_active: 
+                continue
+            await message.add_reaction(emoji)
+        
+        return message
+    
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction, user):
+        """Responde a reações adicionadas às mensagens de iniciativa"""
+        # Ignora reações do próprio bot
+        if user.bot:
+            return
+        
+        message = reaction.message
+        emoji = str(reaction.emoji)
+        
+        # Verifica se esta é uma mensagem de iniciativa que estamos rastreando
+        if message.id not in self.active_messages:
+            return
+        
+        # Obtém o canal e o tracker para esta mensagem
+        channel_id = self.active_messages[message.id]
+        tracker = self.get_tracker(channel_id)
+        
+        # Cria um contexto artificial para enviar respostas
+        ctx = await self.bot.get_context(message)
+        
+        # Remove a reação do usuário para manter a interface limpa
+        try:
+            await message.remove_reaction(emoji, user)
+        except discord.HTTPException:
+            pass  # Ignora erros de permissão
+        
+        # Processa a ação com base no emoji
+        if emoji == NEXT_TURN_EMOJI:
+            # Próximo turno
+            next_char = tracker.next_turn()
+            if next_char:
+                feedback_msg = f"➡️ Agora é o turno de **{next_char.name}**!"
+                
+                # Se mudou de rodada
+                if tracker.current_index == 0:
+                    feedback_msg = f"🔄 **Rodada {tracker.round}**\n" + feedback_msg
+                    
+                await ctx.send(feedback_msg)
+                await self.send_initiative_message(ctx, tracker)
+            else:
+                await ctx.send("❌ Nenhum combate ativo. Use `$init start` ou reaja com ▶️ para iniciar.")
+                
+        elif emoji == START_COMBAT_EMOJI:
+            # Iniciar combate
+            if tracker.start_combat():
+                current = tracker.current_character()
+                await ctx.send(f"⚔️ **Combate iniciado!** Rodada {tracker.round}")
+                await self.send_initiative_message(ctx, tracker)
+                await ctx.send(f"É o turno de **{current.name}**!")
+            else:
+                await ctx.send("❌ Não há personagens na iniciativa para iniciar o combate.")
+                
+        elif emoji == END_COMBAT_EMOJI:
+            # Encerrar combate
+            if tracker.end_combat():
+                await ctx.send("🕊️ **Combate encerrado!**")
+                await self.send_initiative_message(ctx, tracker)
+            else:
+                await ctx.send("❌ Não há combate ativo para encerrar.")
+                
+        elif emoji == CLEAR_LIST_EMOJI:
+            # Limpar lista
+            # Pede confirmação
+            confirm_msg = await ctx.send("⚠️ Tem certeza que deseja limpar a lista de iniciativa? Reaja com ✅ para confirmar ou ❌ para cancelar.")
+            await confirm_msg.add_reaction("✅")
+            await confirm_msg.add_reaction("❌")
+            
+            def check(reaction, user):
+                return user != self.bot.user and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == confirm_msg.id
+            
+            try:
+                reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
+                
+                if str(reaction.emoji) == "✅":
+                    tracker.characters = []
+                    tracker.is_active = False
+                    tracker.current_index = 0
+                    tracker.round = 0
+                    
+                    await ctx.send("🧹 Lista de iniciativa limpa!")
+                    await self.send_initiative_message(ctx, tracker)
+                else:
+                    await ctx.send("Operação cancelada.")
+                
+                # Remove a mensagem de confirmação
+                await confirm_msg.delete()
+                
+            except asyncio.TimeoutError:
+                await ctx.send("Tempo esgotado. Operação cancelada.")
+                await confirm_msg.delete()
+    
     @commands.group(name="init", invoke_without_command=True)
     async def initiative(self, ctx):
         """Mostra a lista de iniciativa atual"""
         tracker = self.get_tracker(ctx.channel.id)
-        await ctx.send(tracker.get_initiative_list())
+        await self.send_initiative_message(ctx, tracker)
     
     @initiative.command(name="add")
     async def add_character(self, ctx, name: str, initiative: int, is_player: str = "npc"):
@@ -34,7 +179,7 @@ class InitiativeCommands(commands.Cog):
         tracker.add_character(character)
         
         await ctx.send(f"✅ {name} adicionado à iniciativa com {initiative} pontos.")
-        await ctx.send(tracker.get_initiative_list())
+        await self.send_initiative_message(ctx, tracker)
     
     @initiative.command(name="remove", aliases=["rm"])
     async def remove_character(self, ctx, *, name: str):
@@ -44,7 +189,7 @@ class InitiativeCommands(commands.Cog):
         
         if tracker.remove_character(name):
             await ctx.send(f"✅ {name} removido da iniciativa.")
-            await ctx.send(tracker.get_initiative_list())
+            await self.send_initiative_message(ctx, tracker)
         else:
             await ctx.send(f"❌ Personagem '{name}' não encontrado.")
     
@@ -56,7 +201,7 @@ class InitiativeCommands(commands.Cog):
         if tracker.start_combat():
             current = tracker.current_character()
             await ctx.send(f"⚔️ **Combate iniciado!** Rodada {tracker.round}")
-            await ctx.send(tracker.get_initiative_list())
+            await self.send_initiative_message(ctx, tracker)
             await ctx.send(f"É o turno de **{current.name}**!")
         else:
             await ctx.send("❌ Não há personagens na iniciativa para iniciar o combate.")
@@ -68,6 +213,7 @@ class InitiativeCommands(commands.Cog):
         
         if tracker.end_combat():
             await ctx.send("🕊️ **Combate encerrado!**")
+            await self.send_initiative_message(ctx, tracker)
         else:
             await ctx.send("❌ Não há combate ativo para encerrar.")
     
@@ -85,7 +231,7 @@ class InitiativeCommands(commands.Cog):
                 message = f"🔄 **Rodada {tracker.round}**\n" + message
                 
             await ctx.send(message)
-            await ctx.send(tracker.get_initiative_list())
+            await self.send_initiative_message(ctx, tracker)
         else:
             await ctx.send("❌ Nenhum combate ativo. Use `$init start` para iniciar.")
     
@@ -101,7 +247,7 @@ class InitiativeCommands(commands.Cog):
             effect = Effect(effect_name, duration, description)
             character.add_effect(effect)
             await ctx.send(f"✨ Efeito **{effect_name}** ({duration} turnos) adicionado a **{char_name}**.")
-            await ctx.send(tracker.get_initiative_list())
+            await self.send_initiative_message(ctx, tracker)
         else:
             await ctx.send(f"❌ Personagem '{char_name}' não encontrado.")
     
@@ -116,7 +262,7 @@ class InitiativeCommands(commands.Cog):
         if character:
             if character.remove_effect(effect_name):
                 await ctx.send(f"❌ Efeito **{effect_name}** removido de **{char_name}**.")
-                await ctx.send(tracker.get_initiative_list())
+                await self.send_initiative_message(ctx, tracker)
             else:
                 await ctx.send(f"❌ Efeito '{effect_name}' não encontrado em '{char_name}'.")
         else:
@@ -132,3 +278,7 @@ class InitiativeCommands(commands.Cog):
         tracker.round = 0
         
         await ctx.send("🧹 Lista de iniciativa limpa!")
+        # Deleta a mensagem anterior se existir
+        await self.delete_previous_message(ctx.channel, tracker)
+        # Envia uma mensagem vazia (ou poderia não enviar nenhuma)
+        await self.send_initiative_message(ctx, tracker)
