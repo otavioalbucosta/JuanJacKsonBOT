@@ -10,6 +10,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True  # Importante para detectar reações!
 
+load_dotenv()
+
 # Prefixo do bot para comandos
 bot = commands.Bot(command_prefix='$', intents=intents)
 
@@ -36,4 +38,5 @@ async def driscol(ctx):
 
 
 # Executa o bot com o token
-bot.run("MTM1ODIwNDk0ODk3Mzc0ODQ4Nw.GSBuq_.NIGAxW36gqLhssAR5XDPFiVUi3CokCwgf03wy0")
+token = os.getenv("DISCORD_TOKEN") 
+bot.run(token)
