@@ -5,12 +5,15 @@ import os
 from dotenv import load_dotenv
 from initiativeCommands import InitiativeCommands
 
+from keep_alive import keep_alive
+
 # Define intents para o bot
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True  # Importante para detectar reações!
 
 load_dotenv()
+keep_alive()
 
 # Prefixo do bot para comandos
 bot = commands.Bot(command_prefix='$', intents=intents)
