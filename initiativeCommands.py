@@ -5,8 +5,11 @@ from typing import Dict
 from initiativeQueue import InitiativeTracker
 from character import Character
 from effects import Effect
+import pickle
+import os.path
 
 
+# Emojis para controle via reações
 NEXT_TURN_EMOJI = "⏩"
 START_COMBAT_EMOJI = "▶️"
 END_COMBAT_EMOJI = "⏹️"
@@ -15,18 +18,72 @@ CLEAR_LIST_EMOJI = "🧹"
 # Lista de emojis para adicionar às mensagens
 CONTROL_EMOJIS = [NEXT_TURN_EMOJI, START_COMBAT_EMOJI, END_COMBAT_EMOJI, CLEAR_LIST_EMOJI]
 
+# Diretório para salvar os dados do tracker
+DATA_DIR = "bot_data"
+TRACKER_FILE = "initiative_tracker_{}.pkl"
+
 # Comandos para o bot relacionados à iniciativa
 class InitiativeCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.trackers: Dict[int, InitiativeTracker] = {}  # Um tracker por canal
         self.active_messages: Dict[int, int] = {}  # Mapeia mensagens para canais
+        
+        # Certifica-se de que o diretório de dados existe
+        if not os.path.exists(DATA_DIR):
+            os.makedirs(DATA_DIR)
+        
+        # Carrega trackers salvos anteriormente
+        self.load_all_trackers()
     
     def get_tracker(self, channel_id: int) -> InitiativeTracker:
         """Obtém (ou cria) um tracker para o canal específico"""
         if channel_id not in self.trackers:
             self.trackers[channel_id] = InitiativeTracker()
+            # Tenta carregar do arquivo
+            self.load_tracker(channel_id)
         return self.trackers[channel_id]
+    
+    def save_tracker(self, channel_id: int):
+        """Salva o estado do tracker para um canal específico"""
+        tracker = self.trackers.get(channel_id)
+        if tracker:
+            filepath = os.path.join(DATA_DIR, TRACKER_FILE.format(channel_id))
+            try:
+                with open(filepath, 'wb') as f:
+                    # Removemos a referência ao last_message_id antes de salvar
+                    # porque pode mudar entre sessões
+                    temp_message_id = tracker.last_message_id
+                    tracker.last_message_id = None
+                    pickle.dump(tracker, f)
+                    tracker.last_message_id = temp_message_id
+                print(f"Tracker para o canal {channel_id} salvo com sucesso!")
+            except Exception as e:
+                print(f"Erro ao salvar tracker para o canal {channel_id}: {e}")
+    
+    def load_tracker(self, channel_id: int) -> bool:
+        """Carrega o estado do tracker para um canal específico"""
+        filepath = os.path.join(DATA_DIR, TRACKER_FILE.format(channel_id))
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'rb') as f:
+                    self.trackers[channel_id] = pickle.load(f)
+                print(f"Tracker para o canal {channel_id} carregado com sucesso!")
+                return True
+            except Exception as e:
+                print(f"Erro ao carregar tracker para o canal {channel_id}: {e}")
+        return False
+    
+    def load_all_trackers(self):
+        """Carrega todos os trackers salvos"""
+        if os.path.exists(DATA_DIR):
+            for filename in os.listdir(DATA_DIR):
+                if filename.startswith("initiative_tracker_") and filename.endswith(".pkl"):
+                    try:
+                        channel_id = int(filename.replace("initiative_tracker_", "").replace(".pkl", ""))
+                        self.load_tracker(channel_id)
+                    except ValueError:
+                        continue
     
     async def delete_previous_message(self, channel, tracker):
         """Deleta a mensagem anterior da fila de iniciativa, se existir"""
@@ -62,11 +119,10 @@ class InitiativeCommands(commands.Cog):
         
         # Adiciona reações para controle
         for emoji in CONTROL_EMOJIS:
-            if emoji == START_COMBAT_EMOJI and tracker.is_active:
-                continue
-            if emoji == END_COMBAT_EMOJI and not tracker.is_active: 
-                continue
             await message.add_reaction(emoji)
+        
+        # Salva o estado do tracker após qualquer modificação
+        self.save_tracker(ctx.channel.id)
         
         return message
     
@@ -282,3 +338,57 @@ class InitiativeCommands(commands.Cog):
         await self.delete_previous_message(ctx.channel, tracker)
         # Envia uma mensagem vazia (ou poderia não enviar nenhuma)
         await self.send_initiative_message(ctx, tracker)
+    
+    @initiative.command(name="effects", aliases=["efs"])
+    async def show_effects(self, ctx, *, char_name: str = None):
+        """Mostra todos os efeitos ativos de um ou todos os personagens
+        Exemplo: $init effects "Goblin" ou $init effects para todos
+        """
+        tracker = self.get_tracker(ctx.channel.id)
+        
+        if not tracker.characters:
+            await ctx.send("❌ Não há personagens na iniciativa.")
+            return
+        
+        embed = discord.Embed(
+            title="📊 Efeitos Ativos",
+            color=discord.Color.purple()
+        )
+        
+        if char_name:
+            # Mostra efeitos de um personagem específico
+            character = tracker.get_character(char_name)
+            if not character:
+                await ctx.send(f"❌ Personagem '{char_name}' não encontrado.")
+                return
+                
+            if not character.effects:
+                embed.description = f"**{character.name}** não possui efeitos ativos."
+            else:
+                for effect in character.effects:
+                    embed.add_field(
+                        name=f"{effect.name} ({effect.duration} turnos)",
+                        value=effect.description if effect.description else "Sem descrição",
+                        inline=False
+                    )
+                embed.set_footer(text=f"Personagem: {character.name}")
+        else:
+            # Mostra efeitos de todos os personagens
+            has_effects = False
+            for character in tracker.characters:
+                if character.effects:
+                    has_effects = True
+                    effects_text = "\n".join([
+                        f"• **{effect.name}** ({effect.duration} turnos): {effect.description if effect.description else 'Sem descrição'}"
+                        for effect in character.effects
+                    ])
+                    embed.add_field(
+                        name=f"{character.name}",
+                        value=effects_text,
+                        inline=False
+                    )
+            
+            if not has_effects:
+                embed.description = "Nenhum personagem possui efeitos ativos no momento."
+        
+        await ctx.send(embed=embed)

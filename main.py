@@ -13,7 +13,6 @@ intents.message_content = True
 intents.reactions = True  # Importante para detectar reações!
 
 load_dotenv()
-keep_alive()
 
 # Prefixo do bot para comandos
 bot = commands.Bot(command_prefix='$', intents=intents)
