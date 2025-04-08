@@ -1,11 +1,12 @@
 import asyncio
 import discord
 from discord.ext import commands
+from discord import app_commands
 from typing import Dict
 from initiativeQueue import InitiativeTracker
 from character import Character
 from effects import Effect
-import pickle
+import json
 import os.path
 
 
@@ -20,7 +21,7 @@ CONTROL_EMOJIS = [NEXT_TURN_EMOJI, START_COMBAT_EMOJI, END_COMBAT_EMOJI, CLEAR_L
 
 # Diretório para salvar os dados do tracker
 DATA_DIR = "bot_data"
-TRACKER_FILE = "initiative_tracker_{}.pkl"
+TRACKER_FILE = "initiative_tracker_{}.json"
 
 # Comandos para o bot relacionados à iniciativa
 class InitiativeCommands(commands.Cog):
@@ -45,42 +46,43 @@ class InitiativeCommands(commands.Cog):
         return self.trackers[channel_id]
     
     def save_tracker(self, channel_id: int):
-        """Salva o estado do tracker para um canal específico"""
+        """Salva o estado do tracker para um canal específico em JSON"""
         tracker = self.trackers.get(channel_id)
         if tracker:
             filepath = os.path.join(DATA_DIR, TRACKER_FILE.format(channel_id))
             try:
-                with open(filepath, 'wb') as f:
-                    # Removemos a referência ao last_message_id antes de salvar
-                    # porque pode mudar entre sessões
-                    temp_message_id = tracker.last_message_id
-                    tracker.last_message_id = None
-                    pickle.dump(tracker, f)
-                    tracker.last_message_id = temp_message_id
-                print(f"Tracker para o canal {channel_id} salvo com sucesso!")
+                # Converter para dicionário e salvar como JSON
+                tracker_dict = tracker.to_dict()
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(tracker_dict, f, ensure_ascii=False, indent=2)
+                print(f"Tracker para o canal {channel_id} salvo em JSON com sucesso!")
             except Exception as e:
-                print(f"Erro ao salvar tracker para o canal {channel_id}: {e}")
+                print(f"Erro ao salvar tracker JSON para o canal {channel_id}: {e}")
     
     def load_tracker(self, channel_id: int) -> bool:
-        """Carrega o estado do tracker para um canal específico"""
+        """Carrega o estado do tracker para um canal específico a partir de JSON"""
         filepath = os.path.join(DATA_DIR, TRACKER_FILE.format(channel_id))
         if os.path.exists(filepath):
             try:
-                with open(filepath, 'rb') as f:
-                    self.trackers[channel_id] = pickle.load(f)
-                print(f"Tracker para o canal {channel_id} carregado com sucesso!")
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    tracker_dict = json.load(f)
+                
+                # Criar tracker a partir do dicionário
+                self.trackers[channel_id] = InitiativeTracker.from_dict(tracker_dict)
+                print(f"Tracker para o canal {channel_id} carregado do JSON com sucesso!")
                 return True
             except Exception as e:
-                print(f"Erro ao carregar tracker para o canal {channel_id}: {e}")
+                print(f"Erro ao carregar tracker JSON para o canal {channel_id}: {e}")
         return False
     
     def load_all_trackers(self):
-        """Carrega todos os trackers salvos"""
+        """Carrega todos os trackers salvos em JSON"""
         if os.path.exists(DATA_DIR):
             for filename in os.listdir(DATA_DIR):
-                if filename.startswith("initiative_tracker_") and filename.endswith(".pkl"):
+                if filename.startswith("initiative_tracker_") and filename.endswith(".json"):
                     try:
-                        channel_id = int(filename.replace("initiative_tracker_", "").replace(".pkl", ""))
+                        channel_id = int(filename.replace("initiative_tracker_", "").replace(".json", ""))
                         self.load_tracker(channel_id)
                     except ValueError:
                         continue
@@ -104,25 +106,43 @@ class InitiativeCommands(commands.Cog):
             # Limpa o ID da última mensagem no tracker
             tracker.last_message_id = None
     
-    async def send_initiative_message(self, ctx, tracker):
+    async def send_initiative_message(self, interaction_or_ctx, tracker):
         """Envia uma nova mensagem de iniciativa com reações após deletar a antiga"""
+        # Determina o canal com base no tipo de entrada
+        channel = interaction_or_ctx.channel
+        
         # Primeiro deleta a mensagem anterior
-        await self.delete_previous_message(ctx.channel, tracker)
+        await self.delete_previous_message(channel, tracker)
         
         # Envia nova mensagem
         content = tracker.get_initiative_list()
-        message = await ctx.send(content)
+        
+        # Adapta para funcionar com Interaction ou Context
+        if isinstance(interaction_or_ctx, discord.Interaction):
+            # É uma interação
+            if interaction_or_ctx.response.is_done():
+                message = await channel.send(content)
+            else:
+                await interaction_or_ctx.response.send_message(content)
+                message = await interaction_or_ctx.original_response()
+        else:
+            # É um contexto
+            message = await interaction_or_ctx.send(content)
         
         # Registra esta mensagem
         tracker.last_message_id = message.id
-        self.active_messages[message.id] = ctx.channel.id
+        self.active_messages[message.id] = channel.id
         
         # Adiciona reações para controle
         for emoji in CONTROL_EMOJIS:
+            if emoji == START_COMBAT_EMOJI and tracker.is_active:
+                continue
+            if emoji == END_COMBAT_EMOJI and not tracker.is_active:
+                continue
             await message.add_reaction(emoji)
         
         # Salva o estado do tracker após qualquer modificação
-        self.save_tracker(ctx.channel.id)
+        self.save_tracker(channel.id)
         
         return message
     
@@ -167,7 +187,7 @@ class InitiativeCommands(commands.Cog):
                 await ctx.send(feedback_msg)
                 await self.send_initiative_message(ctx, tracker)
             else:
-                await ctx.send("❌ Nenhum combate ativo. Use `$init start` ou reaja com ▶️ para iniciar.")
+                await ctx.send("❌ Nenhum combate ativo. Use `/init start` ou reaja com ▶️ para iniciar.")
                 
         elif emoji == START_COMBAT_EMOJI:
             # Iniciar combate
@@ -218,65 +238,78 @@ class InitiativeCommands(commands.Cog):
                 await ctx.send("Tempo esgotado. Operação cancelada.")
                 await confirm_msg.delete()
     
-    @commands.group(name="init", invoke_without_command=True)
-    async def initiative(self, ctx):
-        """Mostra a lista de iniciativa atual"""
-        tracker = self.get_tracker(ctx.channel.id)
-        await self.send_initiative_message(ctx, tracker)
+    # Define o grupo de comandos para o bot
+    initiative_group = app_commands.Group(name="init", description="Comandos de iniciativa de RPG")
     
-    @initiative.command(name="add")
-    async def add_character(self, ctx, name: str, initiative: int, is_player: str = "npc"):
-        """Adiciona um personagem à iniciativa
-        Exemplo: $init add "Goblin Arqueiro" 15 npc"""
-        tracker = self.get_tracker(ctx.channel.id)
-        is_pc = is_player.lower() in ["player", "pc", "jogador"]
+    @initiative_group.command(name="show", description="Mostra a lista de iniciativa atual")
+    async def initiative(self, interaction: discord.Interaction):
+        """Mostra a lista de iniciativa atual"""
+        tracker = self.get_tracker(interaction.channel_id)
+        await self.send_initiative_message(interaction, tracker)
+    
+    @initiative_group.command(name="add", description="Adiciona um personagem à iniciativa")
+    @app_commands.describe(
+        name="Nome do personagem",
+        initiative="Valor da iniciativa (número)",
+        is_player="Tipo de personagem"
+    )
+    @app_commands.choices(is_player=[
+        app_commands.Choice(name="Jogador (PC)", value="pc"),
+        app_commands.Choice(name="NPC/Monstro", value="npc")
+    ])
+    async def add_character(self, interaction: discord.Interaction, name: str, initiative: int, is_player: str):
+        """Adiciona um personagem à iniciativa"""
+        tracker = self.get_tracker(interaction.channel_id)
+        is_pc = is_player.lower() == "pc"  # Agora is_player já vem como "pc" ou "npc" do Choice
         
         character = Character(name, initiative, is_pc)
         tracker.add_character(character)
         
-        await ctx.send(f"✅ {name} adicionado à iniciativa com {initiative} pontos.")
-        await self.send_initiative_message(ctx, tracker)
+        # Mensagem diferente baseada no tipo
+        tipo_texto = "jogador" if is_pc else "NPC"
+        await interaction.response.send_message(f"✅ {name} adicionado à iniciativa como {tipo_texto} com {initiative} pontos.")
+        await self.send_initiative_message(interaction, tracker)
     
-    @initiative.command(name="remove", aliases=["rm"])
-    async def remove_character(self, ctx, *, name: str):
-        """Remove um personagem da iniciativa
-        Exemplo: $init remove "Goblin Arqueiro" """
-        tracker = self.get_tracker(ctx.channel.id)
+    @initiative_group.command(name="remove", description="Remove um personagem da iniciativa")
+    @app_commands.describe(name="Nome do personagem a ser removido")
+    async def remove_character(self, interaction: discord.Interaction, name: str):
+        """Remove um personagem da iniciativa"""
+        tracker = self.get_tracker(interaction.channel_id)
         
         if tracker.remove_character(name):
-            await ctx.send(f"✅ {name} removido da iniciativa.")
-            await self.send_initiative_message(ctx, tracker)
+            await interaction.response.send_message(f"✅ {name} removido da iniciativa.")
+            await self.send_initiative_message(interaction, tracker)
         else:
-            await ctx.send(f"❌ Personagem '{name}' não encontrado.")
+            await interaction.response.send_message(f"❌ Personagem '{name}' não encontrado.")
     
-    @initiative.command(name="start")
-    async def start_combat(self, ctx):
+    @initiative_group.command(name="start", description="Inicia o combate com a iniciativa atual")
+    async def start_combat(self, interaction: discord.Interaction):
         """Inicia o combate com a iniciativa atual"""
-        tracker = self.get_tracker(ctx.channel.id)
+        tracker = self.get_tracker(interaction.channel_id)
         
         if tracker.start_combat():
             current = tracker.current_character()
-            await ctx.send(f"⚔️ **Combate iniciado!** Rodada {tracker.round}")
-            await self.send_initiative_message(ctx, tracker)
-            await ctx.send(f"É o turno de **{current.name}**!")
+            await interaction.response.send_message(f"⚔️ **Combate iniciado!** Rodada {tracker.round}")
+            await self.send_initiative_message(interaction, tracker)
+            await interaction.followup.send(f"É o turno de **{current.name}**!")
         else:
-            await ctx.send("❌ Não há personagens na iniciativa para iniciar o combate.")
+            await interaction.response.send_message("❌ Não há personagens na iniciativa para iniciar o combate.")
     
-    @initiative.command(name="end")
-    async def end_combat(self, ctx):
+    @initiative_group.command(name="end", description="Termina o combate atual")
+    async def end_combat(self, interaction: discord.Interaction):
         """Termina o combate atual"""
-        tracker = self.get_tracker(ctx.channel.id)
+        tracker = self.get_tracker(interaction.channel_id)
         
         if tracker.end_combat():
-            await ctx.send("🕊️ **Combate encerrado!**")
-            await self.send_initiative_message(ctx, tracker)
+            await interaction.response.send_message("🕊️ **Combate encerrado!**")
+            await self.send_initiative_message(interaction, tracker)
         else:
-            await ctx.send("❌ Não há combate ativo para encerrar.")
+            await interaction.response.send_message("❌ Não há combate ativo para encerrar.")
     
-    @initiative.command(name="next", aliases=["n"])
-    async def next_turn(self, ctx):
+    @initiative_group.command(name="next", description="Avança para o próximo turno")
+    async def next_turn(self, interaction: discord.Interaction):
         """Avança para o próximo turno"""
-        tracker = self.get_tracker(ctx.channel.id)
+        tracker = self.get_tracker(interaction.channel_id)
         
         next_char = tracker.next_turn()
         if next_char:
@@ -286,68 +319,73 @@ class InitiativeCommands(commands.Cog):
             if tracker.current_index == 0:
                 message = f"🔄 **Rodada {tracker.round}**\n" + message
                 
-            await ctx.send(message)
-            await self.send_initiative_message(ctx, tracker)
+            await interaction.response.send_message(message)
+            await self.send_initiative_message(interaction, tracker)
         else:
-            await ctx.send("❌ Nenhum combate ativo. Use `$init start` para iniciar.")
+            await interaction.response.send_message("❌ Nenhum combate ativo. Use `/init start` para iniciar.")
     
-    @initiative.command(name="effect", aliases=["ef"])
-    async def add_effect(self, ctx, char_name: str, effect_name: str, duration: int, *, description: str = ""):
-        """Adiciona um efeito a um personagem
-        Exemplo: $init effect "Goblin" "Atordoado" 2 "Não pode agir"
-        """
-        tracker = self.get_tracker(ctx.channel.id)
+    @initiative_group.command(name="effect", description="Adiciona um efeito a um personagem")
+    @app_commands.describe(
+        char_name="Nome do personagem",
+        effect_name="Nome do efeito",
+        duration="Duração em turnos",
+        description="Descrição do efeito (opcional)"
+    )
+    async def add_effect(self, interaction: discord.Interaction, char_name: str, effect_name: str, duration: int, description: str = ""):
+        """Adiciona um efeito a um personagem"""
+        tracker = self.get_tracker(interaction.channel_id)
         character = tracker.get_character(char_name)
         
         if character:
             effect = Effect(effect_name, duration, description)
             character.add_effect(effect)
-            await ctx.send(f"✨ Efeito **{effect_name}** ({duration} turnos) adicionado a **{char_name}**.")
-            await self.send_initiative_message(ctx, tracker)
+            await interaction.response.send_message(f"✨ Efeito **{effect_name}** ({duration} turnos) adicionado a **{char_name}**.")
+            await self.send_initiative_message(interaction, tracker)
         else:
-            await ctx.send(f"❌ Personagem '{char_name}' não encontrado.")
+            await interaction.response.send_message(f"❌ Personagem '{char_name}' não encontrado.")
     
-    @initiative.command(name="remove_effect", aliases=["rmef"])
-    async def remove_effect(self, ctx, char_name: str, effect_name: str):
-        """Remove um efeito de um personagem
-        Exemplo: $init rmef "Goblin" "Atordoado"
-        """
-        tracker = self.get_tracker(ctx.channel.id)
+    @initiative_group.command(name="remove_effect", description="Remove um efeito de um personagem")
+    @app_commands.describe(
+        char_name="Nome do personagem",
+        effect_name="Nome do efeito a ser removido"
+    )
+    async def remove_effect(self, interaction: discord.Interaction, char_name: str, effect_name: str):
+        """Remove um efeito de um personagem"""
+        tracker = self.get_tracker(interaction.channel_id)
         character = tracker.get_character(char_name)
         
         if character:
             if character.remove_effect(effect_name):
-                await ctx.send(f"❌ Efeito **{effect_name}** removido de **{char_name}**.")
-                await self.send_initiative_message(ctx, tracker)
+                await interaction.response.send_message(f"❌ Efeito **{effect_name}** removido de **{char_name}**.")
+                await self.send_initiative_message(interaction, tracker)
             else:
-                await ctx.send(f"❌ Efeito '{effect_name}' não encontrado em '{char_name}'.")
+                await interaction.response.send_message(f"❌ Efeito '{effect_name}' não encontrado em '{char_name}'.")
         else:
-            await ctx.send(f"❌ Personagem '{char_name}' não encontrado.")
+            await interaction.response.send_message(f"❌ Personagem '{char_name}' não encontrado.")
     
-    @initiative.command(name="clear")
-    async def clear_initiative(self, ctx):
+    @initiative_group.command(name="clear", description="Limpa toda a lista de iniciativa")
+    async def clear_initiative(self, interaction: discord.Interaction):
         """Limpa toda a lista de iniciativa"""
-        tracker = self.get_tracker(ctx.channel.id)
+        tracker = self.get_tracker(interaction.channel_id)
         tracker.characters = []
         tracker.is_active = False
         tracker.current_index = 0
         tracker.round = 0
         
-        await ctx.send("🧹 Lista de iniciativa limpa!")
+        await interaction.response.send_message("🧹 Lista de iniciativa limpa!")
         # Deleta a mensagem anterior se existir
-        await self.delete_previous_message(ctx.channel, tracker)
+        await self.delete_previous_message(interaction.channel, tracker)
         # Envia uma mensagem vazia (ou poderia não enviar nenhuma)
-        await self.send_initiative_message(ctx, tracker)
+        await self.send_initiative_message(interaction, tracker)
     
-    @initiative.command(name="effects", aliases=["efs"])
-    async def show_effects(self, ctx, *, char_name: str = None):
-        """Mostra todos os efeitos ativos de um ou todos os personagens
-        Exemplo: $init effects "Goblin" ou $init effects para todos
-        """
-        tracker = self.get_tracker(ctx.channel.id)
+    @initiative_group.command(name="effects", description="Mostra todos os efeitos ativos de um ou todos os personagens")
+    @app_commands.describe(char_name="Nome do personagem (opcional, deixe em branco para ver todos)")
+    async def show_effects(self, interaction: discord.Interaction, char_name: str = None):
+        """Mostra todos os efeitos ativos de um ou todos os personagens"""
+        tracker = self.get_tracker(interaction.channel_id)
         
         if not tracker.characters:
-            await ctx.send("❌ Não há personagens na iniciativa.")
+            await interaction.response.send_message("❌ Não há personagens na iniciativa.")
             return
         
         embed = discord.Embed(
@@ -359,7 +397,7 @@ class InitiativeCommands(commands.Cog):
             # Mostra efeitos de um personagem específico
             character = tracker.get_character(char_name)
             if not character:
-                await ctx.send(f"❌ Personagem '{char_name}' não encontrado.")
+                await interaction.response.send_message(f"❌ Personagem '{char_name}' não encontrado.")
                 return
                 
             if not character.effects:
@@ -391,4 +429,44 @@ class InitiativeCommands(commands.Cog):
             if not has_effects:
                 embed.description = "Nenhum personagem possui efeitos ativos no momento."
         
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="msg", description="Envia uma mensagem para o canal atual")
+    @app_commands.describe(texto="Texto que será enviado no canal")
+    async def mensagem(self, interaction: discord.Interaction, texto: str = None):
+        """Envia uma mensagem para o canal atual"""
+        await interaction.response.send_message(texto if texto else "", ephemeral=True)
+        if texto:
+            await interaction.channel.send(texto)
+
+    @app_commands.command(name="driscol", description="Grita DRISCOOOOOOL!")
+    async def driscol(self, interaction: discord.Interaction):
+        await interaction.response.send_message("DRISCOOOOOOL!")
+
+    # Método adicional para forçar sincronização dos comandos
+    @commands.command(name='sync')
+    @commands.is_owner()
+    async def sync_commands(self, ctx, guild_id=None):
+        """Sincroniza os comandos com o Discord (apenas para o proprietário do bot)"""
+        if guild_id:
+            guild = discord.Object(id=int(guild_id))
+            self.bot.tree.clear_commands(guild=guild)
+            await self.bot.tree.sync(guild=guild)
+            await ctx.send(f"Comandos sincronizados para o servidor ID: {guild_id}")
+        else:
+            # Sincroniza para o servidor atual
+            guild = discord.Object(id=ctx.guild.id)
+            self.bot.tree.clear_commands(guild=guild)
+            await self.bot.tree.sync(guild=guild)
+            await ctx.send(f"Comandos sincronizados para este servidor: {ctx.guild.name}")
+        
+        # Opcionalmente sincroniza globalmente também
+        self.bot.tree.clear_commands()
+        await self.bot.tree.sync()
+        await ctx.send("Comandos sincronizados globalmente também!")
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild):
+        """Sincroniza comandos quando o bot entra em um novo servidor"""
+        await self.bot.tree.sync(guild=discord.Object(id=guild.id))
+        print(f"Comandos sincronizados para o novo servidor: {guild.name}")

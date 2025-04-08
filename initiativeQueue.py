@@ -1,6 +1,6 @@
 
 from character import Character
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 class InitiativeTracker:
     def __init__(self):
@@ -9,6 +9,26 @@ class InitiativeTracker:
         self.round = 0
         self.is_active = False
         self.last_message_id = None  # Armazena o ID da última mensagem enviada pelo tracker
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Converte o tracker para um dicionário para serialização JSON"""
+        return {
+            'characters': [character.to_dict() for character in self.characters],
+            'current_index': self.current_index,
+            'round': self.round,
+            'is_active': self.is_active,
+            # Não incluímos last_message_id pois ele pode mudar entre sessões
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'InitiativeTracker':
+        """Cria um tracker a partir de um dicionário"""
+        tracker = cls()
+        tracker.characters = [Character.from_dict(char_data) for char_data in data['characters']]
+        tracker.current_index = data['current_index']
+        tracker.round = data['round']
+        tracker.is_active = data['is_active']
+        return tracker
     
     def add_character(self, character: Character):
         """Adiciona um personagem à iniciativa e reordena a lista"""

@@ -1,5 +1,5 @@
 
-from typing import List
+from typing import List, Dict, Any
 from effects import Effect
 
 
@@ -10,6 +10,24 @@ class Character:
         self.is_player = is_player  # Se é jogador ou NPC
         self.effects: List[Effect] = []  # Lista de efeitos ativos
         self.is_active = True  # Se está ativo no combate
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Converte o personagem para um dicionário para serialização JSON"""
+        return {
+            'name': self.name,
+            'initiative': self.initiative,
+            'is_player': self.is_player,
+            'effects': [effect.to_dict() for effect in self.effects],
+            'is_active': self.is_active
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Character':
+        """Cria um personagem a partir de um dicionário"""
+        character = cls(data['name'], data['initiative'], data['is_player'])
+        character.effects = [Effect.from_dict(effect_data) for effect_data in data['effects']]
+        character.is_active = data['is_active']
+        return character
     
     def add_effect(self, effect: Effect):
         """Adiciona um efeito ao personagem"""

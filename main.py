@@ -1,44 +1,70 @@
-# Modificação do código principal
+# Correção do código principal para usar slash commands
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 from dotenv import load_dotenv
+
 from initiativeCommands import InitiativeCommands
 
-from keep_alive import keep_alive
+# Carrega as variáveis de ambiente do arquivo .env
+load_dotenv()
 
 # Define intents para o bot
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True  # Importante para detectar reações!
 
-load_dotenv()
+# Classe do bot corrigida
+class RPGBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='$', intents=intents)
+    
+    async def setup_hook(self):
+        # Registrar os cogs
+        await self.add_cog(InitiativeCommands(self))
+        
+        # Sincronizar comandos com o Discord - esta linha é crucial!
+        print("Sincronizando comandos com o Discord...")
+        
+        # Sincronize para cada guild específica em vez de globalmente
+        # Isso faz com que os comandos apareçam mais rapidamente (quase instantaneamente)
+        for guild in self.guilds:
+            await self.tree.sync(guild=discord.Object(id=guild.id))
+            print(f"Comandos sincronizados para: {guild.name}")
+        
+        # Opcionalmente, sincronize globalmente também
+        await self.tree.sync()
+        print("Comandos sincronizados globalmente!")
+    
+    async def on_ready(self):
+        print(f'Bot conectado como {self.user}')
+        print(f'ID do bot: {self.user.id}')
+        print('Servidores conectados:')
+        for guild in self.guilds:
+            print(f'- {guild.name} (ID: {guild.id})')
+        print('-------------------')
 
-# Prefixo do bot para comandos
-bot = commands.Bot(command_prefix='$', intents=intents)
+    async def sync_commands_with_guild(self, guild_id=None):
+        """Sincroniza comandos com uma guild específica ou globalmente"""
+        if guild_id:
+            self.tree.clear_commands(guild=discord.Object(id=guild_id))
+            await self.tree.sync(guild=discord.Object(id=guild_id))
+            print(f"Comandos limpos e sincronizados para guild ID: {guild_id}")
+        else:
+            self.tree.clear_commands()
+            await self.tree.sync()
+            print("Comandos limpos e sincronizados globalmente")
 
-@bot.event
-async def on_ready():
-    print(f'Bot conectado como {bot.user}')
-    print('-------------------')
-    # Carrega o módulo de iniciativa
-    await bot.add_cog(InitiativeCommands(bot))
-
-@bot.command(name='msg')
-async def mensagem(ctx, *, texto=None):
-    """Envia uma mensagem para o canal atual e apaga a mensagem original"""
-    # Apaga a mensagem que chamou o comando
-    user = ctx.message.author
-    await ctx.message.delete()
-    if texto:
-        await ctx.send(texto)
-
-@bot.command(name='driscol')
-async def driscol(ctx):
-    await ctx.send(f"DRISCOOOOOOL!")
+    # Use este comando temporário para forçar sincronização
 
 
+# Inicializa o bot
+bot = RPGBot()
 
-# Executa o bot com o token
-token = os.getenv("DISCORD_TOKEN") 
+# Executa o bot
+token = os.getenv("DISCORD_TOKEN")
+if not token:
+    raise ValueError("Token do Discord não encontrado. Verifique seu arquivo .env")
+
 bot.run(token)
