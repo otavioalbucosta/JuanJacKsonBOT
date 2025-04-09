@@ -1,6 +1,6 @@
 
 from typing import List, Dict, Any
-from effects import Effect
+from Initiative.effects import Effect
 
 
 class Character:

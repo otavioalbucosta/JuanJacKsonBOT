@@ -3,9 +3,9 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Dict
-from initiativeQueue import InitiativeTracker
-from character import Character
-from effects import Effect
+from Initiative.initiativeQueue import InitiativeTracker
+from Initiative.character import Character
+from Initiative.effects import Effect
 import json
 import os.path
 
@@ -442,28 +442,6 @@ class InitiativeCommands(commands.Cog):
     @app_commands.command(name="driscol", description="Grita DRISCOOOOOOL!")
     async def driscol(self, interaction: discord.Interaction):
         await interaction.response.send_message("DRISCOOOOOOL!")
-
-    # Método adicional para forçar sincronização dos comandos
-    @commands.command(name='sync')
-    @commands.is_owner()
-    async def sync_commands(self, ctx, guild_id=None):
-        """Sincroniza os comandos com o Discord (apenas para o proprietário do bot)"""
-        if guild_id:
-            guild = discord.Object(id=int(guild_id))
-            self.bot.tree.clear_commands(guild=guild)
-            await self.bot.tree.sync(guild=guild)
-            await ctx.send(f"Comandos sincronizados para o servidor ID: {guild_id}")
-        else:
-            # Sincroniza para o servidor atual
-            guild = discord.Object(id=ctx.guild.id)
-            self.bot.tree.clear_commands(guild=guild)
-            await self.bot.tree.sync(guild=guild)
-            await ctx.send(f"Comandos sincronizados para este servidor: {ctx.guild.name}")
-        
-        # Opcionalmente sincroniza globalmente também
-        self.bot.tree.clear_commands()
-        await self.bot.tree.sync()
-        await ctx.send("Comandos sincronizados globalmente também!")
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild):

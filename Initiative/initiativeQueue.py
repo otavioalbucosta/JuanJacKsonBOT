@@ -1,5 +1,5 @@
 
-from character import Character
+from Initiative.character import Character
 from typing import List, Optional, Dict, Any
 
 class InitiativeTracker:
